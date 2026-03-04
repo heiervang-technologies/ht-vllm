@@ -255,6 +255,17 @@ _EMBEDDING_MODELS = {
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
+    "Qwen2_5OmniThinkerForConditionalGeneration": (  # LCO-Embedding-Omni-7B
+        "qwen2_5_omni_embed",
+        "Qwen2_5OmniEmbeddingModel",
+    ),
+    "Qwen2_5OmniModel": (  # Full Qwen2.5-Omni used for embedding
+        "qwen2_5_omni_embed",
+        "Qwen2_5OmniEmbeddingModel",
+    ),
+    "ColQwen3": ("colqwen3", "ColQwen3Model"),
+    "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
+    "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
     "LlamaNemotronVLModel": (
         "nemotron_vl",
