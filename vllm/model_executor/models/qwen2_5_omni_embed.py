@@ -11,7 +11,7 @@ Target models:
 - LCO-Embedding/LCO-Embedding-Omni-7B
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 
 import torch
 
