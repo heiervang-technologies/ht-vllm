@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Borealis 4B - LoRA Adapter Demo</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; height: 100vh; display: flex; }
+
+  /* Sidebar */
+  .sidebar { width: 300px; background: #161822; border-right: 1px solid #2a2d3a; display: flex; flex-direction: column; flex-shrink: 0; }
+  .sidebar h2 { padding: 16px; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #8b8fa3; border-bottom: 1px solid #2a2d3a; }
+  .adapter-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .adapter-item { padding: 12px; margin: 4px 0; border-radius: 8px; background: #1e2030; cursor: pointer; transition: all 0.2s; }
+  .adapter-item:hover { background: #252840; }
+  .adapter-item.loaded { border-left: 3px solid #4ade80; }
+  .adapter-item.active { background: #1e3a5f; border-left: 3px solid #60a5fa; }
+  .adapter-item.active.loaded { border-left: 3px solid #60a5fa; }
+  .adapter-name { font-weight: 600; font-size: 13px; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
+  .adapter-desc { font-size: 11px; color: #8b8fa3; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #4a4d5e; display: inline-block; }
+  .status-dot.on { background: #4ade80; }
+  .toggle-btn { font-size: 11px; padding: 3px 10px; border: 1px solid #3a3d4e; border-radius: 4px; background: transparent; color: #8b8fa3; cursor: pointer; transition: all 0.2s; }
+  .toggle-btn:hover { border-color: #60a5fa; color: #60a5fa; }
+  .toggle-btn.loaded { border-color: #4ade80; color: #4ade80; }
+  .toggle-btn:disabled { opacity: 0.4; cursor: wait; }
+
+  /* Base model toggle */
+  .base-model { padding: 12px; margin: 4px 0 8px 0; border-radius: 8px; background: #1e2030; cursor: pointer; border-left: 3px solid transparent; }
+  .base-model.active { background: #1e3a5f; border-left: 3px solid #60a5fa; }
+
+  /* Chat area */
+  .chat-area { flex: 1; display: flex; flex-direction: column; }
+  .chat-header { padding: 12px 20px; border-bottom: 1px solid #2a2d3a; font-size: 13px; color: #8b8fa3; display: flex; align-items: center; gap: 8px; }
+  .chat-header .model-badge { background: #1e3a5f; color: #60a5fa; padding: 2px 10px; border-radius: 12px; font-size: 12px; }
+  .messages { flex: 1; overflow-y: auto; padding: 20px; }
+  .message { margin: 8px 0; padding: 12px 16px; border-radius: 12px; max-width: 80%; line-height: 1.5; font-size: 14px; white-space: pre-wrap; }
+  .message.user { background: #1e3a5f; margin-left: auto; }
+  .message.assistant { background: #1e2030; }
+  .message.system-msg { background: transparent; color: #8b8fa3; font-size: 12px; text-align: center; max-width: 100%; }
+  .input-area { padding: 16px 20px; border-top: 1px solid #2a2d3a; display: flex; gap: 8px; }
+  .input-area textarea { flex: 1; background: #1e2030; border: 1px solid #2a2d3a; border-radius: 8px; padding: 10px 14px; color: #e0e0e0; font-size: 14px; resize: none; font-family: inherit; outline: none; }
+  .input-area textarea:focus { border-color: #60a5fa; }
+  .input-area button { background: #3b82f6; color: white; border: none; border-radius: 8px; padding: 10px 20px; cursor: pointer; font-size: 14px; }
+  .input-area button:hover { background: #2563eb; }
+  .input-area button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Compare mode */
+  .compare-bar { padding: 8px 16px; background: #161822; border-bottom: 1px solid #2a2d3a; display: flex; gap: 8px; align-items: center; }
+  .compare-bar label { font-size: 12px; color: #8b8fa3; }
+  .compare-bar input[type="checkbox"] { accent-color: #3b82f6; }
+  .compare-container { display: flex; flex: 1; overflow: hidden; }
+  .compare-panel { flex: 1; display: flex; flex-direction: column; }
+  .compare-panel + .compare-panel { border-left: 1px solid #2a2d3a; }
+  .compare-panel .panel-header { padding: 8px 16px; font-size: 12px; color: #8b8fa3; border-bottom: 1px solid #2a2d3a; text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <h2>LoRA Adapters</h2>
+  <div class="adapter-list">
+    <div class="base-model active" onclick="selectAdapter(null)">
+      <div class="adapter-name">
+        Base Model
+        <span class="status-dot on"></span>
+      </div>
+      <div class="adapter-desc">borealis-4b-instruct-preview (no adapter)</div>
+    </div>
+    <div id="adapter-list"></div>
+  </div>
+</div>
+
+<div class="chat-area">
+  <div class="chat-header">
+    Chatting with: <span class="model-badge" id="current-model">Base Model</span>
+    <div style="flex:1"></div>
+    <label style="font-size:12px; display:flex; align-items:center; gap:4px;">
+      <input type="checkbox" id="compare-toggle" onchange="toggleCompare()">
+      Compare with base
+    </label>
+  </div>
+
+  <div id="single-chat" style="display:flex; flex-direction:column; flex:1; overflow:hidden;">
+    <div class="messages" id="messages"></div>
+  </div>
+
+  <div id="compare-chat" style="display:none; flex:1; overflow:hidden;">
+    <div class="compare-container">
+      <div class="compare-panel">
+        <div class="panel-header" id="compare-left-label">Base Model</div>
+        <div class="messages" id="compare-left"></div>
+      </div>
+      <div class="compare-panel">
+        <div class="panel-header" id="compare-right-label">Adapter</div>
+        <div class="messages" id="compare-right"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="input-area">
+    <textarea id="input" rows="2" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" onkeydown="handleKey(event)"></textarea>
+    <button id="send-btn" onclick="sendMessage()">Send</button>
+  </div>
+</div>
+
+<script>
+const API = '';
+let adapters = {};
+let selectedAdapter = null;
+let chatHistory = [];
+let comparing = false;
+let streaming = false;
+
+async function fetchAdapters() {
+  const resp = await fetch(`${API}/api/adapters`);
+  adapters = await resp.json();
+  renderAdapters();
+}
+
+function renderAdapters() {
+  const el = document.getElementById('adapter-list');
+  el.innerHTML = '';
+  for (const [name, info] of Object.entries(adapters)) {
+    const div = document.createElement('div');
+    div.className = `adapter-item${info.loaded ? ' loaded' : ''}${selectedAdapter === name ? ' active' : ''}`;
+    div.innerHTML = `
+      <div class="adapter-name">
+        ${formatName(name)}
+        <button class="toggle-btn${info.loaded ? ' loaded' : ''}" onclick="event.stopPropagation(); toggleAdapter('${name}')">${info.loaded ? 'Unload' : 'Load'}</button>
+      </div>
+      <div class="adapter-desc">${info.description}</div>
+    `;
+    div.onclick = () => selectAdapter(name);
+    el.appendChild(div);
+  }
+  // Update base model highlight
+  document.querySelector('.base-model').className = `base-model${selectedAdapter === null ? ' active' : ''}`;
+}
+
+function formatName(name) {
+  return name.replace('alignment_', '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+async function toggleAdapter(name) {
+  const info = adapters[name];
+  const action = info.loaded ? 'unload' : 'load';
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = action === 'load' ? 'Loading...' : 'Unloading...';
+
+  try {
+    const resp = await fetch(`${API}/api/adapters/${name}/${action}`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.error) {
+      appendSystemMsg(`Error: ${data.error}`);
+    } else {
+      adapters[name].loaded = action === 'load';
+      if (action === 'unload' && selectedAdapter === name) selectAdapter(null);
+      appendSystemMsg(`${formatName(name)} ${action === 'load' ? 'loaded' : 'unloaded'}`);
+    }
+  } catch (e) {
+    appendSystemMsg(`Failed to ${action}: ${e.message}`);
+  }
+  renderAdapters();
+}
+
+function selectAdapter(name) {
+  if (name && !adapters[name]?.loaded) return;
+  selectedAdapter = name;
+  document.getElementById('current-model').textContent = name ? formatName(name) : 'Base Model';
+  document.getElementById('compare-right-label').textContent = name ? formatName(name) : 'Adapter';
+  renderAdapters();
+}
+
+function toggleCompare() {
+  comparing = document.getElementById('compare-toggle').checked;
+  document.getElementById('single-chat').style.display = comparing ? 'none' : 'flex';
+  document.getElementById('compare-chat').style.display = comparing ? 'flex' : 'none';
+}
+
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
+
+async function sendMessage() {
+  const input = document.getElementById('input');
+  const text = input.value.trim();
+  if (!text || streaming) return;
+  input.value = '';
+  streaming = true;
+  document.getElementById('send-btn').disabled = true;
+
+  chatHistory.push({ role: 'user', content: text });
+
+  if (comparing && selectedAdapter) {
+    appendMsg('compare-left', 'user', text);
+    appendMsg('compare-right', 'user', text);
+    const baseEl = appendMsg('compare-left', 'assistant', '');
+    const adapterEl = appendMsg('compare-right', 'assistant', '');
+    await Promise.all([
+      streamChat([...chatHistory], null, baseEl),
+      streamChat([...chatHistory], selectedAdapter, adapterEl),
+    ]);
+  } else {
+    appendMsg('messages', 'user', text);
+    const el = appendMsg('messages', 'assistant', '');
+    await streamChat([...chatHistory], selectedAdapter, el);
+  }
+
+  chatHistory.push({ role: 'assistant', content: '(see above)' });
+  streaming = false;
+  document.getElementById('send-btn').disabled = false;
+  input.focus();
+}
+
+async function streamChat(messages, adapter, targetEl) {
+  try {
+    const resp = await fetch(`${API}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages, adapter, stream: true }),
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') break;
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            targetEl.textContent += delta;
+            targetEl.parentElement.scrollTop = targetEl.parentElement.scrollHeight;
+          }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    targetEl.textContent = `Error: ${e.message}`;
+  }
+}
+
+function appendMsg(containerId, role, text) {
+  const container = document.getElementById(containerId);
+  const div = document.createElement('div');
+  div.className = `message ${role}`;
+  div.textContent = text;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  return div;
+}
+
+function appendSystemMsg(text) {
+  const container = document.getElementById(comparing ? 'compare-left' : 'messages');
+  const div = document.createElement('div');
+  div.className = 'message system-msg';
+  div.textContent = text;
+  container.appendChild(div);
+}
+
+fetchAdapters();
+setInterval(fetchAdapters, 30000);
+</script>
+</body>
+</html>
