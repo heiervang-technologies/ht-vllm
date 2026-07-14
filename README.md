@@ -1,4 +1,45 @@
 <!-- markdownlint-disable MD001 MD041 -->
+<h1 align="center">ht-vLLM</h1>
+
+<p align="center">
+    <em>Heiervang Technologies fork of <a href="https://github.com/vllm-project/vllm">vLLM</a></em>
+</p>
+
+<p align="center">
+    <a href="https://github.com/orgs/heiervang-technologies/discussions">HT Discussions</a> |
+    <a href="https://github.com/orgs/heiervang-technologies/discussions/3">Fork Management Guide</a> |
+    <a href="https://github.com/vllm-project/vllm">Upstream Project</a> |
+    <a href="https://docs.vllm.ai"><b>Documentation</b></a> |
+    <a href="https://arxiv.org/abs/2309.06180"><b>Paper</b></a> |
+    <a href="https://discuss.vllm.ai"><b>User Forum</b></a> |
+    <a href="https://slack.vllm.ai"><b>Developer Slack</b></a>
+</p>
+
+---
+
+## HT Fork Changes
+
+This is the **Heiervang Technologies** fork of [vLLM](https://github.com/vllm-project/vllm). The `main` branch is kept as a clean fast-forward mirror of upstream. All HT-specific changes live on the `ht` branch.
+
+### HT features on top of upstream
+
+| Change | Description | Contributed back? |
+| --- | --- | :---: |
+| HT fork docs | This section, updated CONTRIBUTING.md with fork management guide | No |
+| Pascal CUDA builds | Build support for NVIDIA Pascal GPUs with compute capability `sm_61` | No |
+| Pascal GPTQ DP4A | Correct INT4 `gptq_gemm` decode kernel using DP4A on `sm_61`; measured 2.32× fp16 for `gate_proj`, 2.02× for `down_proj`, and 43.1 vs 39.1 tok/s end to end | No |
+
+### Branch strategy
+
+- **`main`** — Clean mirror of upstream. Never modified directly.
+- **`ht`** — Default branch. Contains all HT-specific additions rebased on top of `main`.
+
+For questions, feature requests, or bug reports related to this fork, please use the [HT Discussions page](https://github.com/orgs/heiervang-technologies/discussions). For upstream issues, use the [upstream repository](https://github.com/vllm-project/vllm/issues).
+
+See the [HT Fork Management Guide](https://github.com/orgs/heiervang-technologies/discussions/3) for our branch conventions, sync workflow, and contribution process.
+
+---
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-dark.png">

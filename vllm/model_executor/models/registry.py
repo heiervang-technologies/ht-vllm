@@ -267,6 +267,14 @@ _EMBEDDING_MODELS = {
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),
+    "Qwen2_5OmniThinkerForConditionalGeneration": (  # LCO-Embedding-Omni-7B
+        "qwen2_5_omni_embed",
+        "Qwen2_5OmniEmbeddingModel",
+    ),
+    "Qwen2_5OmniModel": (  # Full Qwen2.5-Omni used for embedding
+        "qwen2_5_omni_embed",
+        "Qwen2_5OmniEmbeddingModel",
+    ),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
     # Technically Terratorch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
