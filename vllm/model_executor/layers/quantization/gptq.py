@@ -29,6 +29,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
 
@@ -39,6 +40,8 @@ else:
     QuantizationMethods = str
 
 logger = init_logger(__name__)
+
+PASCAL_DP4A_MAX_ROWS = 8
 
 
 class GPTQConfig(QuantizationConfig):
@@ -94,9 +97,16 @@ class GPTQConfig(QuantizationConfig):
                 "Currently, only 2/3/4/8-bit weight quantization is "
                 f"supported for GPTQ, but got {self.weight_bits} bits."
             )
-        # Somehow gptq_gemm 4-bit is buggy, maybe fix it in the future.
-        # For now, show a warning, since gptq_marlin will be used by default.
-        if self.weight_bits == 4:
+        # Pascal uses a dedicated DP4A kernel for sequential 4-bit weights.
+        # Other gptq_gemm configurations retain the existing warning since
+        # gptq_marlin remains the preferred CUDA path where it is available.
+        pascal_dp4a = (
+            self.weight_bits == 4
+            and not self.desc_act
+            and (self.group_size == -1 or self.group_size % 32 == 0)
+            and current_platform.is_device_capability(61)
+        )
+        if self.weight_bits == 4 and not pascal_dp4a:
             logger.warning_once(
                 "Currently, the 4-bit gptq_gemm kernel for GPTQ is buggy. "
                 "Please switch to gptq_marlin."
@@ -238,6 +248,13 @@ class GPTQLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: GPTQConfig):
         self.quant_config = quant_config
 
+        self.use_pascal_dp4a = (
+            quant_config.weight_bits == 4
+            and not quant_config.desc_act
+            and (quant_config.group_size == -1 or quant_config.group_size % 32 == 0)
+            and current_platform.is_device_capability(61)
+        )
+
         # GPTQ v1 and v2 format deals with zero points differently
         self.use_v2_format = quant_config.checkpoint_format == "gptq_v2"
 
@@ -271,7 +288,17 @@ class GPTQLinearMethod(LinearMethodBase):
             group_size = self.quant_config.group_size
         else:
             group_size = input_size
-        exllama_state = ExllamaState.UNINITIALIZED
+        layer.pascal_dp4a_enabled = (
+            self.use_pascal_dp4a
+            and input_size == input_size_per_partition
+            and input_size_per_partition % 32 == 0
+            and group_size % 32 == 0
+        )
+        exllama_state = (
+            ExllamaState.UNUSED
+            if layer.pascal_dp4a_enabled
+            else ExllamaState.UNINITIALIZED
+        )
         scale_and_zero_size = input_size // group_size
         scale_and_zero_input_dim = None
         if (
@@ -302,7 +329,12 @@ class GPTQLinearMethod(LinearMethodBase):
         g_idx = RowvLLMParameter(
             data=torch.tensor(
                 [
-                    i // self.quant_config.group_size
+                    i
+                    // (
+                        group_size
+                        if layer.pascal_dp4a_enabled
+                        else self.quant_config.group_size
+                    )
                     for i in range(input_size_per_partition)
                 ],
                 dtype=torch.int32,
@@ -361,6 +393,16 @@ class GPTQLinearMethod(LinearMethodBase):
         layer.g_idx = Parameter(layer.g_idx.data, requires_grad=False)
         layer.scales = Parameter(layer.scales.data, requires_grad=False)
 
+        if layer.pascal_dp4a_enabled:
+            # Preserve the sequential g_idx for large-prefill reconstruction.
+            # An empty tensor selects DP4A only for the small-row decode path.
+            layer.register_buffer(
+                "pascal_dp4a_idx",
+                torch.empty((0,), dtype=torch.int, device=layer.g_idx.device),
+                persistent=False,
+            )
+            return
+
         # exllama needs to shuffle the weight after the weight is loaded
         # here we do the shuffle on first forward pass
         if layer.exllama_state == ExllamaState.UNINITIALIZED:
@@ -384,12 +426,17 @@ class GPTQLinearMethod(LinearMethodBase):
 
         # GPTQ v1 and v2 format checkpoints deals with zero points differently,
         # and require different gemm kernels.
+        g_idx = (
+            layer.pascal_dp4a_idx
+            if layer.pascal_dp4a_enabled and reshaped_x.shape[0] <= PASCAL_DP4A_MAX_ROWS
+            else layer.g_idx
+        )
         output = ops.gptq_gemm(
             reshaped_x,
             layer.qweight,
             layer.qzeros,
             layer.scales,
-            layer.g_idx,
+            g_idx,
             layer.exllama_state == ExllamaState.READY,
             self.use_v2_format,
             self.quant_config.weight_bits,

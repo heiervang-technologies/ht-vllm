@@ -53,6 +53,195 @@ __host__ __forceinline__ hipblasStatus_t __compat_hipblasHgemm(
   #define rocblas_hgemm __compat_hipblasHgemm
 #endif
 
+#if !defined(USE_ROCM)
+
+// Pascal has fast INT8 dot products but exceptionally slow native FP16 math.
+// Quantize each 32-value activation block to INT8, then multiply the packed
+// GPTQ weights with __dp4a while applying the original per-group scale/zero.
+// Keeping the activation blocks smaller than the GPTQ groups limits the extra
+// activation quantization error without changing the checkpoint format.
+constexpr int PASCAL_DP4A_ACT_BLOCK = 32;
+constexpr int PASCAL_DP4A_THREADS = 128;
+
+__device__ void quantize_half_to_int8_pascal(const half* __restrict__ a,
+                                             int8_t* __restrict__ q_a,
+                                             float2* __restrict__ q_a_params,
+                                             const int size_k,
+                                             const int act_blocks,
+                                             const int row) {
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+
+  for (int act_block = warp; act_block < act_blocks; act_block += 4) {
+    const int offset = act_block * PASCAL_DP4A_ACT_BLOCK;
+    const float value = __half2float(a[row * size_k + offset + lane]);
+    float max_abs = fabsf(value);
+
+  #pragma unroll
+    for (int delta = 16; delta > 0; delta >>= 1) {
+      max_abs = fmaxf(max_abs, __shfl_down_sync(0xffffffff, max_abs, delta));
+    }
+    max_abs = __shfl_sync(0xffffffff, max_abs, 0);
+
+    const float scale = max_abs / 127.0f;
+    const float inv_scale = max_abs > 0.0f ? 127.0f / max_abs : 0.0f;
+    int q = __float2int_rn(value * inv_scale);
+    q = q > 127 ? 127 : (q < -127 ? -127 : q);
+    q_a[offset + lane] = static_cast<int8_t>(q);
+
+    int sum = q;
+  #pragma unroll
+    for (int delta = 16; delta > 0; delta >>= 1) {
+      sum += __shfl_down_sync(0xffffffff, sum, delta);
+    }
+    if (lane == 0) {
+      q_a_params[act_block] = make_float2(scale, static_cast<float>(sum));
+    }
+  }
+}
+
+__global__ void gemm_int8_q4_pascal_dp4a_kernel(
+    const half* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
+    const uint32_t* __restrict__ b_gptq_qzeros,
+    const half* __restrict__ b_gptq_scales, half* __restrict__ c,
+    const int size_n, const int size_k, const int groups,
+    const bool use_v2_format) {
+  const int row = blockIdx.y;
+  const int act_blocks = size_k / PASCAL_DP4A_ACT_BLOCK;
+  extern __shared__ int8_t shared_q_a[];
+  float2* shared_q_a_params = reinterpret_cast<float2*>(shared_q_a + size_k);
+  quantize_half_to_int8_pascal(a, shared_q_a, shared_q_a_params, size_k,
+                               act_blocks, row);
+  __syncthreads();
+
+  const int n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n >= size_n) return;
+
+  const int group_size = size_k / groups;
+  const int zero_width = size_n / 8;
+  const int zero_shift = (n & 7) * 4;
+  const int* q_a_int = reinterpret_cast<const int*>(shared_q_a);
+  float result = 0.0f;
+
+  for (int act_block = 0; act_block < act_blocks; ++act_block) {
+    const int* a_ptr = q_a_int + act_block * 8;
+    int q_dot = 0;
+
+  #pragma unroll
+    for (int packed = 0; packed < 4; ++packed) {
+      const uint32_t q = b_q_weight[(act_block * 4 + packed) * size_n + n];
+      const uint32_t even = q & 0x0f0f0f0f;
+      const uint32_t odd = (q >> 4) & 0x0f0f0f0f;
+      const int q0123 = __byte_perm(even, odd, 0x5140);
+      const int q4567 = __byte_perm(even, odd, 0x7362);
+      q_dot = __dp4a(q0123, a_ptr[packed * 2], q_dot);
+      q_dot = __dp4a(q4567, a_ptr[packed * 2 + 1], q_dot);
+    }
+
+    const int group = act_block * PASCAL_DP4A_ACT_BLOCK / group_size;
+    const uint32_t packed_zero = b_gptq_qzeros[group * zero_width + n / 8];
+    const int zero =
+        ((packed_zero >> zero_shift) & 0x0f) + (use_v2_format ? 0 : 1);
+    const float2 act_params = shared_q_a_params[act_block];
+    const int corrected_dot = q_dot - zero * __float2int_rn(act_params.y);
+    const float weight_scale = __half2float(b_gptq_scales[group * size_n + n]);
+    result = fmaf(static_cast<float>(corrected_dot),
+                  act_params.x * weight_scale, result);
+  }
+
+  c[row * size_n + n] = __float2half_rn(result);
+}
+
+__global__ void gemm_int8_q4_pascal_dp4a_split_k_kernel(
+    const half* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
+    const uint32_t* __restrict__ b_gptq_qzeros,
+    const half* __restrict__ b_gptq_scales, half* __restrict__ c,
+    const int size_n, const int size_k, const int groups,
+    const bool use_v2_format) {
+  const int row = blockIdx.y;
+  const int act_blocks = size_k / PASCAL_DP4A_ACT_BLOCK;
+  extern __shared__ int8_t shared_q_a[];
+  float2* shared_q_a_params = reinterpret_cast<float2*>(shared_q_a + size_k);
+  float* partials = reinterpret_cast<float*>(shared_q_a_params + act_blocks);
+  quantize_half_to_int8_pascal(a, shared_q_a, shared_q_a_params, size_k,
+                               act_blocks, row);
+  __syncthreads();
+
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int n = blockIdx.x * 32 + lane;
+  const int group_size = size_k / groups;
+  const int zero_width = size_n / 8;
+  const int zero_shift = (n & 7) * 4;
+  const int* q_a_int = reinterpret_cast<const int*>(shared_q_a);
+  float result = 0.0f;
+
+  if (n < size_n) {
+    for (int act_block = warp; act_block < act_blocks; act_block += 4) {
+      const int* a_ptr = q_a_int + act_block * 8;
+      int q_dot = 0;
+
+  #pragma unroll
+      for (int packed = 0; packed < 4; ++packed) {
+        const uint32_t q = b_q_weight[(act_block * 4 + packed) * size_n + n];
+        const uint32_t even = q & 0x0f0f0f0f;
+        const uint32_t odd = (q >> 4) & 0x0f0f0f0f;
+        const int q0123 = __byte_perm(even, odd, 0x5140);
+        const int q4567 = __byte_perm(even, odd, 0x7362);
+        q_dot = __dp4a(q0123, a_ptr[packed * 2], q_dot);
+        q_dot = __dp4a(q4567, a_ptr[packed * 2 + 1], q_dot);
+      }
+
+      const int group = act_block * PASCAL_DP4A_ACT_BLOCK / group_size;
+      const uint32_t packed_zero = b_gptq_qzeros[group * zero_width + n / 8];
+      const int zero =
+          ((packed_zero >> zero_shift) & 0x0f) + (use_v2_format ? 0 : 1);
+      const float2 act_params = shared_q_a_params[act_block];
+      const int corrected_dot = q_dot - zero * __float2int_rn(act_params.y);
+      const float weight_scale =
+          __half2float(b_gptq_scales[group * size_n + n]);
+      result = fmaf(static_cast<float>(corrected_dot),
+                    act_params.x * weight_scale, result);
+    }
+  }
+
+  partials[warp * 32 + lane] = result;
+  __syncthreads();
+  if (warp == 0 && n < size_n) {
+    result = partials[lane] + partials[32 + lane] + partials[64 + lane] +
+             partials[96 + lane];
+    c[row * size_n + n] = __float2half_rn(result);
+  }
+}
+
+void gemm_half_q_half_pascal_dp4a(const half* a, const uint32_t* b_q_weight,
+                                  const uint32_t* b_gptq_qzeros,
+                                  const half* b_gptq_scales, half* c,
+                                  int size_m, int size_n, int size_k,
+                                  int groups, bool use_v2_format) {
+  const int act_blocks = size_k / PASCAL_DP4A_ACT_BLOCK;
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const int activation_shared_bytes =
+      size_k * sizeof(int8_t) + act_blocks * sizeof(float2);
+  if (size_k >= 4096) {
+    dim3 gemm_grid(DIVIDE(size_n, 32), size_m);
+    const int shared_bytes =
+        activation_shared_bytes + PASCAL_DP4A_THREADS * sizeof(float);
+    gemm_int8_q4_pascal_dp4a_split_k_kernel<<<gemm_grid, PASCAL_DP4A_THREADS,
+                                              shared_bytes, stream>>>(
+        a, b_q_weight, b_gptq_qzeros, b_gptq_scales, c, size_n, size_k, groups,
+        use_v2_format);
+  } else {
+    dim3 gemm_grid(DIVIDE(size_n, PASCAL_DP4A_THREADS), size_m);
+    gemm_int8_q4_pascal_dp4a_kernel<<<gemm_grid, PASCAL_DP4A_THREADS,
+                                      activation_shared_bytes, stream>>>(
+        a, b_q_weight, b_gptq_qzeros, b_gptq_scales, c, size_n, size_k, groups,
+        use_v2_format);
+  }
+}
+
+#endif
+
 __forceinline__ __device__ half2 dot22_8(half2 (&dq)[4], const half* a_ptr,
                                          const half2 g_result) {
   half2 result = {};
@@ -1831,7 +2020,39 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         bool use_exllama, bool use_v2_format, int64_t bit) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  at::Tensor c = torch::zeros({a.size(0), b_q_weight.size(1)}, options);
+
+  bool use_pascal_dp4a = false;
+#if !defined(USE_ROCM)
+  const auto* device_properties = at::cuda::getCurrentDeviceProperties();
+  const int64_t size_k = a.size(1);
+  const int64_t groups = b_gptq_qzeros.size(0);
+  use_pascal_dp4a =
+      device_properties->major == 6 && device_properties->minor == 1 &&
+      bit == 4 && !use_exllama && b_g_idx.numel() == 0 &&
+      a.size(0) <= MAX_ALT_GEMM_ROWS && groups > 0 && size_k % groups == 0 &&
+      size_k % vllm::gptq::PASCAL_DP4A_ACT_BLOCK == 0 &&
+      (size_k / groups) % vllm::gptq::PASCAL_DP4A_ACT_BLOCK == 0 &&
+      size_k + size_k / vllm::gptq::PASCAL_DP4A_ACT_BLOCK * sizeof(float2) <=
+          device_properties->sharedMemPerBlock -
+              (size_k >= 4096 ? vllm::gptq::PASCAL_DP4A_THREADS * sizeof(float)
+                              : 0);
+#endif
+
+  at::Tensor c = use_pascal_dp4a
+                     ? torch::empty({a.size(0), b_q_weight.size(1)}, options)
+                     : torch::zeros({a.size(0), b_q_weight.size(1)}, options);
+
+#if !defined(USE_ROCM)
+  if (use_pascal_dp4a) {
+    vllm::gptq::gemm_half_q_half_pascal_dp4a(
+        (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
+        (const uint32_t*)b_gptq_qzeros.data_ptr(),
+        (const half*)b_gptq_scales.data_ptr(), (half*)c.data_ptr(), c.size(0),
+        c.size(1), a.size(1), b_gptq_qzeros.size(0), use_v2_format);
+    return c;
+  }
+#endif
+
   at::Tensor temp_dq = torch::empty(
       {b_q_weight.size(0) * 32 / bit, b_q_weight.size(1)}, options);
 

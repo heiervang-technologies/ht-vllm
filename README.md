@@ -21,11 +21,13 @@
 
 This is the **Heiervang Technologies** fork of [vLLM](https://github.com/vllm-project/vllm). The `main` branch is kept as a clean fast-forward mirror of upstream. All HT-specific changes live on the `ht` branch.
 
-### What's different from upstream
+### HT features on top of upstream
 
 | Change | Description | Contributed back? |
-|--------|-------------|:-----------------:|
+| --- | --- | :---: |
 | HT fork docs | This section, updated CONTRIBUTING.md with fork management guide | No |
+| Pascal CUDA builds | Build support for NVIDIA Pascal GPUs with compute capability `sm_61` | No |
+| Pascal GPTQ DP4A | Correct INT4 `gptq_gemm` decode kernel using DP4A on `sm_61`; measured 2.32× fp16 for `gate_proj`, 2.02× for `down_proj`, and 43.1 vs 39.1 tok/s end to end | No |
 
 ### Branch strategy
 
