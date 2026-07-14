@@ -213,8 +213,17 @@ __global__ void moe_wna16_gemm_kernel(
       if (mul_topk_weight) {
         res[m] *= topk_weights[token_index];
       }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 700
+      // Pascal (sm_61) has no scalar __half/__nv_bfloat16 atomicAdd (added in
+      // sm_70). The MoE-wna16 kernel is never launched on the Pascal gem fleet
+      // (dense models only), so a non-atomic read-modify-write is enough to make
+      // _moe_C compile and import. Do NOT run MoE-wna16 models on sm_61.
+      output[token_index * size_n + offset_n] = Dtype::float2num(
+          Dtype::num2float(output[token_index * size_n + offset_n]) + res[m]);
+#else
       atomicAdd(&output[token_index * size_n + offset_n],
                 Dtype::float2num(res[m]));
+#endif
     }
 
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800
